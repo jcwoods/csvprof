@@ -16,8 +16,10 @@
 
 struct Globals
 {
-    char delim;
-    int  hasHeader;
+    FILE *input;      /* the input file stream (default stdin */
+    char delim;       /* the field delimiter (default '|') */
+    int  hasHeader;   /* file has header as first record (default 0) */
+    int  verbose;     /* be verbose in what we're doing... (default 0) */
 };
 
 struct Globals glb;
@@ -39,6 +41,7 @@ struct Offset
 #define F_FL_HASUPPER (0x0010)
 #define F_FL_HASDIGIT (0x0020)
 #define F_FL_HASSPACE (0x0040)
+#define F_FL_HASPUNCT (0x0080)
 
 struct Field
 {
@@ -281,6 +284,7 @@ static void update_offset(struct Record *rec, int f, int o, uint8_t b)
             }
             else if (isdigit(b))   field->flags |= F_FL_HASDIGIT;
             else if (isspace(b))   field->flags |= F_FL_HASSPACE;
+            else if (ispunct(b))   field->flags |= F_FL_HASPUNCT;
         }
     }
 
@@ -360,7 +364,7 @@ static inline void update_record(struct Record *rec, int len)
     rec->totLen += len;
     rec->count++;
 
-    if (rec->count % 1000 == 0)
+    if (glb.verbose && rec->count % 1000 == 0)
         fprintf(stdout, "%d records completed\n", (int) rec->count);
 
     return;
@@ -387,10 +391,10 @@ static void do_report(struct Record *rec)
         else
             printf("    Field[%d]: ", fno);
 
-        printf("%5lu (min), %5lu (max), %5lu (avg) bytes, %5lu (empty)\n",
+        printf("%5lu (min), %5lu (max), %5lu (avg), %5lu (count), %5lu (empty)\n",
                 fld->minLen, fld->maxLen,
                 (fld->totLen / fld->count),
-                fld->numEmpty);
+                fld->count, fld->numEmpty);
 
         int out = 0;
         if ((fld->flags & F_FL_NONASCII) != 0)
@@ -439,6 +443,13 @@ static void do_report(struct Record *rec)
         {
             if (out == 0) printf("        ");
             printf("HAS_SPACE ");
+            out = 1;
+        }
+
+        if ((fld->flags & F_FL_HASPUNCT) != 0)
+        {
+            if (out == 0) printf("        ");
+            printf("HAS_PUNCT ");
             out = 1;
         }
 
@@ -526,20 +537,64 @@ void endofrec(int c, void *data)
 
 void Initialize(int argc, char **argv)
 {
+    int argn;
+
     memset(&glb, 0x00, sizeof(glb));
-    /* glb.delim = '\t'; */
     glb.delim = '|';
-    /* glb.hasHeader = 1; */
     glb.hasHeader = 0;
+    glb.input = stdin;
+    glb.verbose = 0;
 
-    /* TODO - complete */
+    for (argn = 1; argn < argc; argn++)
+    {
+        if (strcmp(argv[argn], "-d") == 0 ||
+            strcmp(argv[argn], "--delim") == 0)
+        {
+            /* TODO - unsafe behavior, assumes valid argument.
+                      check limits, arg length, blah blah... */
+            argn++;
+            glb.delim = argv[argn][0];
 
+            continue;
+        }
+
+        if (strcmp(argv[argn], "-h") == 0 ||
+            strcmp(argv[argn], "--header") == 0)
+        {
+            glb.hasHeader = 1;
+            continue;
+        }
+
+        if (strcmp(argv[argn], "-v") == 0 ||
+            strcmp(argv[argn], "--verbose") == 0)
+        {
+            glb.verbose = 1;
+            continue;
+        }
+
+        if (glb.input == stdin)
+        {
+            glb.input = fopen(argv[argn], "r");
+            if (glb.input == (FILE *) NULL)
+            {
+                fprintf(stderr, "ERROR: fopen(%s) failed: %s (%s:%d)\n",
+                        argv[1], strerror(errno), __FILE__, __LINE__);
+                exit(1);
+            }
+
+            continue;
+        }
+
+        fprintf(stderr, "ERROR: invalid command line argument: %s\n",
+                argv[argn]);
+        exit(1);
+    }
+    
     return;
 }
 
 int main(int argc, char **argv)
 {
-    FILE *fp;
     struct csv_parser p;
     char buf[8192];
     size_t bytes_read;
@@ -552,15 +607,7 @@ int main(int argc, char **argv)
     if (csv_init(&p, 0) != 0) exit(EXIT_FAILURE);
     csv_set_delim(&p, glb.delim);
 
-    fp = fopen(argv[1], "rb");
-    if (fp == (FILE *) NULL)
-    {
-        fprintf(stderr, "ERROR: fopen(%s) failed: %s (%s:%d)\n",
-                argv[1], strerror(errno), __FILE__, __LINE__);
-         exit(1);
-    }
-
-    while ((bytes_read = fread(buf, 1, sizeof(buf), fp)) > 0)
+    while ((bytes_read = fread(buf, 1, sizeof(buf), glb.input)) > 0)
     {
         if (csv_parse(&p, buf, bytes_read,
                       endoffield, endofrec, rec) != bytes_read)
@@ -572,7 +619,7 @@ int main(int argc, char **argv)
     }
 
     csv_fini(&p, endoffield, endofrec, rec);
-    fclose(fp);
+    fclose(glb.input);
     csv_free(&p);
 
     do_report(rec);
